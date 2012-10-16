@@ -1,6 +1,6 @@
 /*
  *  TV Input - Linux DVB interface
- *  Copyright (C) 2007 Andreas Öman
+ *  Copyright (C) 2007 Andreas ï¿½man
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -43,6 +43,7 @@
 #include "psi.h"
 #include "dvb_support.h"
 #include "notify.h"
+#include "dvb_ca_handle.h"
 
 
 
@@ -98,7 +99,12 @@ dvb_service_start(service_t *t, unsigned int weight, int force_start)
     tda->tda_open_service(tda, t);
 
   dvb_table_add_pmt(t->s_dvb_mux_instance, t->s_pmt_pid);
-
+  
+  if(!r)
+  {
+    /*[urosv] configure DVB CA device to start descrambling this service*/
+    start_transport_descrambling(t);
+  }
   return r;
 }
 
@@ -110,6 +116,9 @@ static void
 dvb_service_stop(service_t *t)
 {
   th_dvb_adapter_t *tda = t->s_dvb_mux_instance->tdmi_adapter;
+
+  /*[urosv] configure DVB CA device to stop descrambling this service*/
+  stop_transport_descrambling(t);
 
   lock_assert(&global_lock);
 

@@ -160,6 +160,9 @@ SRCS-${CONFIG_LINUXDVB} += \
 	src/dvb/dvb_satconf.c \
 	src/dvb/dvb_input_filtered.c \
 	src/dvb/dvb_input_raw.c \
+	src/dvb/dvb_ca_handle.c \
+	src/dvb/en50221.c \
+	src/dvb/dvb_ca_util.c \
 	src/webui/extjs_dvb.c \
 	src/muxes.c \
 

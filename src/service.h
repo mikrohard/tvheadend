@@ -42,6 +42,9 @@ typedef struct th_descrambler {
 
   void (*td_stop)(struct th_descrambler *d);
 
+  /*[urosv] time of descramble start is needed to limit the duration of dummy descrambling - throwing packets away.*/
+  int64_t time_of_first_descramble_call;
+
 } th_descrambler_t;
 
 
@@ -52,7 +55,7 @@ typedef void (pid_section_callback_t)(struct service *t,
 				      struct elementary_stream *pi,
 				      const uint8_t *section, int section_len);
 
-
+#define MAX_RAW_DESCR_DATA 255 /* [urosv] TODO check if this is enough for any descriptor.*/
 LIST_HEAD(caid_list, caid);
 /**
  *
@@ -64,6 +67,8 @@ typedef struct caid {
   uint16_t caid;
   uint32_t providerid;
 
+  uint8_t raw_descr_data[MAX_RAW_DESCR_DATA]; /*[urosv] added storage of the whole raw descriptor*/
+  uint8_t raw_descr_len;
 } caid_t;
 
 /**
@@ -242,6 +247,13 @@ typedef struct service {
    * PID for the PMT of this MPEG-TS stream.
    */
   uint16_t s_pmt_pid;
+
+  /**
+   * Version of the last received PMT
+   * [urosv] Added this member to properly build the PMT for scrambled channels
+   * TODO Check if this is really needed or if it can be placed into some more pmt related class
+   */
+  uint8_t s_pmt_version;
 
   /**
    * Set if transport is enabled (the default).  If disabled it should

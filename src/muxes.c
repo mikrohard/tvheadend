@@ -162,6 +162,10 @@ static int _muxes_load_dvbs ( mux_t *mux, const char *line )
   if (v2) {
     if ((mux->hierarchy     = dvb_mux_str2hier(hier)) == -1) return 1;
     if ((mux->constellation = dvb_mux_str2qam(qam))   == -1) return 1;
+    /*[urosv] added support for distinguishing DVB-S and DVB-S2 */
+    mux->delsys = SYS_DVBS2;
+  } else {
+    mux->delsys = SYS_DVBS;
   }
 
   return 0;

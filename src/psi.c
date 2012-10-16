@@ -1,6 +1,6 @@
 /*
  *  MPEG TS Program Specific Information code
- *  Copyright (C) 2007 - 2010 Andreas Öman
+ *  Copyright (C) 2007 - 2010 Andreas ï¿½man
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -223,9 +223,10 @@ psi_build_pat(service_t *t, uint8_t *buf, int maxlen, int pmtpid)
 
 /**
  * Add a CA descriptor
+ * [urosv] p_rawdescrinnerdata buffer and its rawdescrinnerlen field contain the descriptor without the first two bytes (tag and len)
  */
 static int
-psi_desc_add_ca(service_t *t, uint16_t caid, uint32_t provid, uint16_t pid)
+psi_desc_add_ca(service_t *t, uint16_t caid, uint32_t provid, uint16_t pid, const uint8_t *p_rawdescrinnerdata, uint8_t rawdescrinnerlen)
 {
   elementary_stream_t *st;
   caid_t *c;
@@ -241,8 +242,21 @@ psi_desc_add_ca(service_t *t, uint16_t caid, uint32_t provid, uint16_t pid)
   st->es_position = 0x40000;
 
   LIST_FOREACH(c, &st->es_caids, link) {
-    if(c->caid == caid) {
+	if(c->caid == caid && c->delete_me == 1) { /*[urosv]: Added condition(delete_me) that only old not yet processed caids (the ones still marked for deletion) are processed
+	  												This enables to have two or more descriptors with the same caid in the caids list. Needed for descrambling of irdeto card - orf1 channel: has duplicate CA descriptors.*/
       c->delete_me = 0;
+
+      /*[urosv] Save the whole raw descriptor for later */
+      /* Descriptor tag and len bytes are not included in the p_rawdescrinnerdata buffer. Hence +-2 in the code below*/
+      if (rawdescrinnerlen > MAX_RAW_DESCR_DATA-2) {
+        tvhlog(LOG_ERR,"PSI","CA descriptor cut off. Size too big: %d\n", rawdescrinnerlen+2);
+        rawdescrinnerlen = MAX_RAW_DESCR_DATA-2;
+      }
+      c->raw_descr_data[0] = DVB_DESC_CA;
+      c->raw_descr_data[1] = rawdescrinnerlen;
+      memcpy(c->raw_descr_data+2, p_rawdescrinnerdata, rawdescrinnerlen);
+      c->raw_descr_len = rawdescrinnerlen+2;
+      /*[urosv] end*/
 
       if(c->providerid != provid) {
 	c->providerid = provid;
@@ -257,6 +271,18 @@ psi_desc_add_ca(service_t *t, uint16_t caid, uint32_t provid, uint16_t pid)
   c->caid = caid;
   c->providerid = provid;
   
+  /*[urosv] Save the whole raw descriptor for later */
+  /* descriptor tag and len bytes are not included in the p_rawdescrinnerdata buffer. Hence +-2 in the code below*/
+  if (rawdescrinnerlen > MAX_RAW_DESCR_DATA-2) {
+    tvhlog(LOG_ERR,"PSI","CA descriptor cut off. Size too big: %d\n", rawdescrinnerlen+2);
+    rawdescrinnerlen = MAX_RAW_DESCR_DATA-2;
+  }
+  c->raw_descr_data[0] = DVB_DESC_CA;
+  c->raw_descr_data[1] = rawdescrinnerlen;
+  memcpy(c->raw_descr_data+2, p_rawdescrinnerdata, rawdescrinnerlen);
+  c->raw_descr_len = rawdescrinnerlen+2;
+  /*[urosv] end*/
+
   c->delete_me = 0;
   LIST_INSERT_HEAD(&st->es_caids, c, link);
   r |= PMT_UPDATE_NEW_CAID;
@@ -291,7 +317,7 @@ psi_desc_ca(service_t *t, const uint8_t *buffer, int size)
       uint16_t xpid = ((buffer[i]&0x1F) << 8) | buffer[i + 1];
       uint16_t xprovid = (buffer[i + 2] << 8) | buffer[i + 3];
 
-      r |= psi_desc_add_ca(t, caid, xprovid, xpid);
+      r |= psi_desc_add_ca(t, caid, xprovid, xpid, buffer, size);
     }
     break;
   case 0x0500:// Viaccess
@@ -310,14 +336,23 @@ psi_desc_ca(service_t *t, const uint8_t *buffer, int size)
   case 0x4a00://DRECrypt
     if (caid != 0x4aee) { // Bulcrypt
       provid = size < 4 ? 0 : buffer[4];
-      break;
+    } else {
+      provid = 0;
     }
+    break;
+  case 0x0600:
+    provid = 0;
+    /* [urosv] Currently provider id changes are not handled. TODO implement irdeto providerid parsing from descriptor:
+    { "Irdeto",           0x0600 },
+    { "Irdeto",           0x0602 },
+    { "Irdeto",           0x0604 }, */
+    break;
   default:
     provid = 0;
     break;
   }
 
-  r |= psi_desc_add_ca(t, caid, provid, pid);
+  r |= psi_desc_add_ca(t, caid, provid, pid, buffer, size);
 
   return r;
 }
@@ -462,6 +497,9 @@ psi_parse_pmt(service_t *t, const uint8_t *ptr, int len, int chksvcid,
     update |= PMT_UPDATE_PCR;
   }
 
+  /*[urosv] Save the version parameter: needed for sending PMT to DVB CA device for descrambling.*/
+  t->s_pmt_version = version;
+
   ptr += 9;
   len -= 9;
 
@@ -475,7 +513,7 @@ psi_parse_pmt(service_t *t, const uint8_t *ptr, int len, int chksvcid,
       st->es_delete_me = 1;
 
       LIST_FOREACH(c, &st->es_caids, link)
-	c->delete_me = 1;
+	c->delete_me = 1; /*[urosv] JUST A REMINDER This mechanism of marking all caids within the stream for deletion must not be changed, because caids adding in the psi_desc_add_ca function depends on it*/
     }
   }
 
@@ -514,6 +552,31 @@ psi_parse_pmt(service_t *t, const uint8_t *ptr, int len, int chksvcid,
     ancillary_id = -1;
 
     switch(estype) {
+    					/*	[urosv] list of possible types as from iec 13818-1 standard document
+    					Value                                              Description
+    					0x00    ITU-T | ISO/IEC Reserved
+    					0x01    MPEG-1: ISO/IEC 11172 Video
+    					0x02    MPEG-2: ITU-T Rec. H.262 | ISO/IEC 13818-2 Video or ISO/IEC 11172-2 constrained parameter video stream
+    					0x03    MP1: ISO/IEC 11172 Audio
+    					0x04    MPEG-2 Audio: ISO/IEC 13818-3 Audio
+    					0x05    ITU-T Rec. H.222.0 | ISO/IEC 13818-1 private_sections
+    					0x06    ITU-T Rec. H.222.0 | ISO/IEC 13818-1 PES packets containing private data
+    					0x07    ISO/IEC 13522 MHEG
+    					0x08    ITU-T Rec. H.222.0 | ISO/IEC 13818-1 Annex A DSM-CC
+    					0x09    ITU-T Rec. H.222.1
+    					0x0A    ISO/IEC 13818-6 type A
+    					0x0B    ISO/IEC 13818-6 type B
+    					0x0C    ISO/IEC 13818-6 type C
+    					0x0D    ISO/IEC 13818-6 type D
+    					0x0E    ITU-T Rec. H.222.0 | ISO/IEC 13818-1 auxiliary
+    					0x0F    ISO/IEC 13818-7 Audio with ADTS transport syntax
+    					0x10    ISO/IEC 14496-2 Visual
+    					0x11    ISO/IEC 14496-3 Audio with the LATM transport syntax as defined in ISO/IEC 14496-3 / AMD 1
+    					0x12    ISO/IEC 14496-1 SL-packetized stream or FlexMux stream carried in PES packets
+    					0x13    ISO/IEC 14496-1 SL-packetized stream or FlexMux stream carried in ISO/IEC14496_sections.
+    					0x14    ISO/IEC 13818-6 Synchronized Download Protocol
+    				0x15-0x7F ITU-T Rec. H.222.0 | ISO/IEC 13818-1 Reserved
+    				0x80-0xFF User Private*/
     case 0x01:
     case 0x02:
       hts_stream_type = SCT_MPEG2VIDEO;

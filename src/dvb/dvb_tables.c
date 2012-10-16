@@ -1,6 +1,6 @@
 /*
  *  DVB Table support
- *  Copyright (C) 2007 Andreas �man
+ *  Copyright (C) 2007 Andreas �man
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -1187,4 +1187,214 @@ dvb_table_flush_all(th_dvb_mux_instance_t *tdmi)
   while((tdt = LIST_FIRST(&tdmi->tdmi_tables)) != NULL)
     dvb_tdt_destroy(tda, tdmi, tdt);
   
+}
+
+/**
+ * TODO [urosv] This function is copied from src/psi.c, which is not very nice.
+ * Alternative would be to export it in psi.c
+ */
+static int
+psi_append_crc32(uint8_t *buf, int offset, int maxlen)
+{
+  uint32_t crc;
+
+  if(offset + 4 > maxlen)
+    return -1;
+
+  crc = tvh_crc32(buf, offset, 0xffffffff);
+
+  buf[offset + 0] = crc >> 24;
+  buf[offset + 1] = crc >> 16;
+  buf[offset + 2] = crc >> 8;
+  buf[offset + 3] = crc;
+
+  assert(tvh_crc32(buf, offset + 4, 0xffffffff) == 0);
+
+  return offset + 4;
+}
+
+/**
+ * PMT generator adopted to fill the pmt buffer as expected by the en50221.c functions - TS_programm_map_section structure as in iso13-818-1 standard: pg 46
+ * Usage for Conditional Access: sending commands to start descrambling
+ */
+int
+psi_build_pmt_fordescrambling(struct service *s, uint8_t *p_pmt, int maxlen)
+{
+	uint16_t pcrpid = s->s_pcr_pid;
+	uint16_t sid = s->s_dvb_service_id;
+	uint8_t ver = s->s_pmt_version;
+
+	tvhlog(LOG_DEBUG,"dvb","psi_build_pmt_fordescrambling started...\n");
+
+	/*psi_section *psi = t->tht_pmt_section;*/ /*[urosv] TODO: Could be useful in the future. The whole PMT is saved in here.*/
+
+  int c, tlen, dlen, l;
+
+  uint8_t *buf, *buf1;
+
+  buf = p_pmt;
+
+  if(maxlen < 12)
+    return -1;
+
+  p_pmt[0] = 2; /* table id, always 2 */
+
+  p_pmt[3] = sid >> 8; /* program id , SID*/
+  p_pmt[4] = sid & 0xff;
+
+  /*
+   * version_number – This 5-bit field is the version number of the TS_program_map_section. The version number shall be
+   * incremented by 1 modulo 32 when a change in the information carried within the section occurs. Version number refers
+   * to the definition of a single program, and therefore to a single section. When the current_next_indicator is set to '1', then
+   * the version_number shall be that of the currently applicable TS_program_map_section. When the current_next_indicator
+   * is set to '0', then the version_number shall be that of the next applicable TS_program_map_section.
+   *
+   * current_next_indicator – A 1-bit field, which when set to '1' indicates that the TS_program_map_section sent is
+   * currently applicable. When the bit is set to '0', it indicates that the TS_program_map_section sent is not yet applicable
+   * and shall be the next TS_program_map_section to become valid.
+   *
+   * */
+  p_pmt[5] = 0x01 | (ver << 1); /* current_next_indicator + version */
+
+  p_pmt[6] = 0; 								/* section number , expected always 0*/
+  p_pmt[7] = 0; 								/* last section number , expected always 0*/
+
+  p_pmt[8] = 0xe0 | (pcrpid >> 8);
+  p_pmt[9] =         pcrpid;
+
+
+
+  /*
+   * Insert the CA descriptors
+   *
+   */
+  buf = p_pmt + 12;
+  tlen = 12;
+
+  uint16_t dllen=0; /* Program info length : should summarize all the bytes occupied by CA descriptors only*/
+
+	caid_t *ca;
+	elementary_stream_t *es;
+	TAILQ_FOREACH(es, &s->s_components, es_link) {
+		LIST_FOREACH(ca, &es->es_caids, link) {
+
+				if(ca->raw_descr_len > maxlen - tlen) {
+					tvhlog(LOG_ERR, "dvb", "Inserting CA descriptor failed: size too big %d > %d\n", ca->raw_descr_len, maxlen - tlen );
+				} else 	{
+					memcpy(buf,ca->raw_descr_data,ca->raw_descr_len);
+				  buf += ca->raw_descr_len;
+				  tlen += ca->raw_descr_len;
+				  dllen += ca->raw_descr_len;
+				}
+		}
+	}
+	p_pmt[10] = 0xf0 | (dllen >> 8); /* Program info length hi byte*/
+	p_pmt[11] = 0xff & dllen; /* Program info length low byte*/
+
+
+
+  /*
+   * Insert the elementary stream descriptors
+   */
+	TAILQ_FOREACH(es, &s->s_components, es_link) {
+
+    tvhlog(LOG_DEBUG, "dvb", "Preparing ES descriptor: pid: %d, type: 0x%x \n", es->es_pid, es->es_type);
+
+    switch(es->es_type) {
+    case SCT_MPEG2VIDEO:
+      c = 0x02;
+      break;
+
+    case SCT_MPEG2AUDIO:
+      c = 0x04;
+      break;
+
+    case SCT_DVBSUB:
+      c = 0x06;
+      break;
+
+    case SCT_MP4A:
+      c = 0x11;	/* TODO [urosv] Check why this should be mapped to 0x11 and not to original 0x0f*/
+      break;
+
+    case SCT_AAC:
+      c = 0x11;
+      break;
+
+    case SCT_H264:
+      c = 0x1b;
+      break;
+
+    case SCT_AC3:
+      //c = 0x81;
+    	c = 0x06; /* TODO [urosv] This is needed to exactly match the OFR1 and ORF2 elementary stream descriptors. It also works without it, so we leave it commented*/
+      break;
+
+    case SCT_TELETEXT:
+      c = 0x06;
+      break;
+
+
+    default:
+      continue;
+    }
+
+    buf[0] = c;
+    buf[1] = 0xe0 | (es->es_pid >> 8);
+    buf[2] =         es->es_pid;
+
+    buf1 = &buf[3];
+    tlen += 5;
+    buf  += 5;
+    dlen = 0;
+    //[jrod] - from latest version of tvheadend project
+    switch(es->es_type) {
+    case SCT_MPEG2AUDIO:
+    case SCT_MP4A:
+    case SCT_AAC:
+      buf[0] = DVB_DESC_LANGUAGE;
+      buf[1] = 4;
+      memcpy(&buf[2],es->es_lang,3);
+      buf[5] = 0; /* Main audio */
+      dlen = 6;
+      break;
+    case SCT_DVBSUB:
+      buf[0] = DVB_DESC_SUBTITLE;
+      buf[1] = 8;
+      memcpy(&buf[2],es->es_lang,3);
+      buf[5] = 16; /* Subtitling type */
+      buf[6] = es->es_composition_id >> 8;
+      buf[7] = es->es_composition_id;
+      buf[8] = es->es_ancillary_id >> 8;
+      buf[9] = es->es_ancillary_id;
+      dlen = 10;
+      break;
+    case SCT_AC3:
+      buf[0] = DVB_DESC_LANGUAGE;
+      buf[1] = 4;
+      memcpy(&buf[2],es->es_lang,3);
+      buf[5] = 0; /* Main audio */
+      buf[6] = DVB_DESC_AC3;
+      buf[7] = 1;
+      buf[8] = 0; /* XXX: generate real AC3 desc */
+      dlen = 9;
+      break;
+    default:
+      break;
+    }
+
+    tlen += dlen;
+    buf  += dlen;
+
+    buf1[0] = 0xf0 | (dlen >> 8);
+    buf1[1] =         dlen;
+  }
+
+  l = tlen - 3 + 4;
+
+  p_pmt[1] = 0xb0 | (l >> 8);
+  p_pmt[2] =         l;
+
+  tvhlog(LOG_DEBUG,"dvb","Psi_build_pmt_fordescrambling ended.\n");
+  return psi_append_crc32(p_pmt, tlen, maxlen);
 }

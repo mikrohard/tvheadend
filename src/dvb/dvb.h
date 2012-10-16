@@ -271,8 +271,10 @@ typedef struct th_dvb_adapter {
 
   // PIDs that needs to be requeued and processed as tables
   uint8_t tda_table_filter[8192];
-
-
+  
+  // [urosv]: multithreaded access CA + FE is a problem for DVB device tbs qbox devices
+  pthread_mutex_t adapter_access_ca;
+  
 } th_dvb_adapter_t;
 
 /**
@@ -516,6 +518,8 @@ int dvb_pidx11_callback
 #define TDT_QUICKREQ      0x2
 #define TDT_CA		        0x4
 #define TDT_TDT           0x8
+
+int psi_build_pmt_fordescrambling(struct service *t, uint8_t *p_pmt, int maxlen);
 
 void dvb_table_dispatch(uint8_t *sec, int r, th_dvb_table_t *tdt);
 
